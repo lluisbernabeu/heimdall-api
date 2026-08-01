@@ -358,12 +358,37 @@ def incidents_heatmap(db: Session, profile_id: int):
             .filter(Incident.server_time_ms.isnot(None)).all())
     by_minute = {}
     by_type = {}
+    # Por carrera: track + fecha + conteo por tipo
+    race_cache = {}
+    for rid in race_ids:
+        r = db.query(Race).filter_by(id=rid).first()
+        if r:
+            race_cache[rid] = r
+    by_race = {}
     for i in incs:
         minute = int(i.server_time_ms // 60000)
         by_minute[minute] = by_minute.get(minute, 0) + 1
         t = i.incident_type or "?"
         by_type[t] = by_type.get(t, 0) + 1
-    return {"by_minute": by_minute, "by_type": by_type, "total": len(incs)}
+        rid = i.race_id
+        slot = by_race.setdefault(rid, {"track": None, "event": None, "date": None, "counts": {}})
+        slot["counts"][t] = slot["counts"].get(t, 0) + 1
+    by_race_list = []
+    for rid, slot in by_race.items():
+        r = race_cache.get(rid)
+        by_race_list.append({
+            "race_id": rid,
+            "track_name": r.track_name if r else None,
+            "event_name": r.event_name if r else None,
+            "race_date": r.race_date.isoformat() if r and r.race_date else None,
+            "split": r.split if r else None,
+            "finish_pos": r.finish_pos if r else None,
+            "total": sum(slot["counts"].values()),
+            "counts": slot["counts"],
+        })
+    # Orden: más incidentes primero
+    by_race_list.sort(key=lambda x: -x["total"])
+    return {"by_minute": by_minute, "by_type": by_type, "by_race": by_race_list, "total": len(incs)}
 
 
 def standings_view(db: Session, profile_id: int):
