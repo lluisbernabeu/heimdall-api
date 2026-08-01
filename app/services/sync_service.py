@@ -148,9 +148,11 @@ class SyncService:
         self.db.flush()
         return race
 
-    def _sync_race_detail(self, race: Race):
+    def _sync_race_detail(self, race: Race, only_me: bool = False):
         """Descarga la carrera completa (resultados de todos los pilotos), y para los
-        pilotos del split guarda vueltas con sectores + incidentes."""
+        pilotos del split guarda vueltas con sectores + incidentes.
+        Si only_me=True (carreras antiguas), solo descarga las vueltas del propio
+        usuario para no saturar la API de LFM."""
         try:
             data = lfm.get_race(race.lfm_race_id)
         except Exception as e:
@@ -189,6 +191,12 @@ class SyncService:
             pilots[uid] = p
 
         detail_users = list(pilots.keys())
+        if only_me:
+            # Carreras antiguas: solo el propio usuario (evitar saturar la API)
+            me = (self.db.query(LfmProfile)
+                  .filter_by(id=race.profile_id).first())
+            me_uid = me.lfm_user_id if me else None
+            detail_users = [u for u in detail_users if u == me_uid]
 
         # Guardar resultados de todos los pilotos como vueltas "vacías" no — las vueltas
         # solo se guardan con getLapDetails. Aquí guardamos incidentes del resultado resumido
@@ -393,21 +401,24 @@ class SyncService:
                 if race.id not in [x.id for x in new_races]:
                     new_races.append(race)
 
-            # Detallar solo carreras recientes (limit SYNC_LAP_RACES) y siempre las
-            # nuevas no procesadas (sin vueltas guardadas)
-            recent = new_races[:SYNC_LAP_RACES] if SYNC_LAP_RACES > 0 else []
+            # Detallar TODAS las carreras sin vueltas: las SYNC_LAP_RACES más
+            # recientes con detalle completo (todos los pilotos); las más antiguas
+            # solo con las vueltas del propio usuario (no saturar la API de LFM).
+            # Así el histórico se rellena por completo aunque las carreras
+            # antiguas se quedaron fuera del límite de detalle en síncronos previos.
             detail_targets = []
-            for i, race in enumerate(recent):
+            for i, race in enumerate(new_races):
                 has_laps = self.db.query(Lap).filter_by(race_id=race.id).first()
                 if not has_laps:
-                    detail_targets.append(race)
+                    detail_targets.append((i, race))
 
-            for i, race in enumerate(detail_targets):
+            for i, race in detail_targets:
+                only_me = i >= SYNC_LAP_RACES if SYNC_LAP_RACES > 0 else True
                 self._update_state(st, phase="Vueltas",
                                    current_msg=f"Descargando vueltas de {race.event_name} "
                                                f"({race.track_name})...",
                                    done_steps=2 + i)
-                self._sync_race_detail(race)
+                self._sync_race_detail(race, only_me=only_me)
                 # Posición oficial vuelta a vuelta (narrativa "qué pasó")
                 self._sync_position_chart(race)
 
