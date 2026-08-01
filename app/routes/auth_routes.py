@@ -58,7 +58,9 @@ def register(body: RegisterIn, db: Session = Depends(get_db)):
 def login(body: LoginIn, db: Session = Depends(get_db)):
     user = db.query(User).filter_by(email=body.email.lower()).first()
     if not user or not verify_password(body.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Email o contraseña incorrectos")
+        # 400 (no 401): credenciales incorrectas ≠ token expirado. La app
+        # interpreta 401 como "sesión caducada" y borra el token.
+        raise HTTPException(status_code=400, detail="Email o contraseña incorrectos")
     return {"token": create_token(user.id, user.email), "email": user.email}
 
 
