@@ -385,3 +385,178 @@ def _profile_name(db: Session, profile_id: int) -> str:
     if not p:
         return ""
     return f"{p.vorname or ''} {p.nachname or ''}".strip()
+
+
+def insight(db: Session, profile_id: int):
+    """Veredicto en lenguaje natural sobre la forma actual del piloto.
+
+    Combina tendencia de rating/SR, incidentes, sector más débil y última
+    carrera para decir QUÉ está pasando, no solo mostrar números.
+    """
+    ov = overview(db, profile_id)
+    if not ov:
+        return None
+    profile = ov["profile"]
+    s = ov["stats"]
+    last = (ov["last_races"] or [{}])[0]
+    sectors = sectors_analysis(db, profile_id)
+
+    name = (f"{profile.get('vorname') or ''} {profile.get('nachname') or ''}"
+            .strip() or profile.get("username") or "Piloto")
+    rt = s.get("rating_trend_5")
+    st = s.get("sr_trend_5")
+    avg_inc = s.get("avg_incidents") or 0
+
+    # --- Veredicto general ---
+    if rt is not None and rt <= -100:
+        verdict = {
+            "title": "En caída",
+            "emoji": "📉",
+            "tone": "red",
+            "msg": (f"{name}, tu rating ha perdido {abs(rt):.0f} puntos en las "
+                    f"últimas 5 carreras. La buena noticia: tu último resultado "
+                    f"remonta la tendencia."),
+        }
+    elif rt is not None and rt >= 100:
+        verdict = {
+            "title": "En racha",
+            "emoji": "🔥",
+            "tone": "green",
+            "msg": (f"{name}, vas como un tiro: +{rt:.0f} puntos de rating en "
+                    f"las últimas 5 carreras. Sigue así."),
+        }
+    else:
+        verdict = {
+            "title": "Estable",
+            "emoji": "⚖️",
+            "tone": "cyan",
+            "msg": (f"{name}, tu rating se mantiene estable en las últimas 5 "
+                    f"carreras. El margen está en los detalles."),
+        }
+
+    # --- Señal 1: incidentes (lo que más hunde SR) ---
+    insights = []
+    sr_now = profile.get("safety_rating")
+    if avg_inc >= 10:
+        insights.append({
+            "icon": "warning",
+            "tone": "red",
+            "title": "Demasiados incidentes",
+            "msg": (f"Promedias {avg_inc:.1f} incidentes por carrera — eso es "
+                    f"lo que está hundiendo tu SR ({sr_now}). "
+                    f"Bajar a <6 por carrera cambiaría tu curva por completo."),
+        })
+    elif avg_inc >= 6:
+        insights.append({
+            "icon": "warning",
+            "tone": "orange",
+            "title": "Incidentes a vigilar",
+            "msg": (f"Promedias {avg_inc:.1f} incidentes por carrera. "
+                    f"Reducirlos a la mitad te subiría el SR de forma clara."),
+        })
+    else:
+        insights.append({
+            "icon": "shield",
+            "tone": "green",
+            "title": "Conducción limpia",
+            "msg": (f"Solo {avg_inc:.1f} incidentes de media por carrera — "
+                    f"tu SR agradece la limpieza."),
+        })
+
+    # --- Señal 2: sector más débil ---
+    if sectors:
+        gaps = {
+            "S1": [x.get("gap_s1_ms") for x in sectors if x.get("gap_s1_ms")],
+            "S2": [x.get("gap_s2_ms") for x in sectors if x.get("gap_s2_ms")],
+            "S3": [x.get("gap_s3_ms") for x in sectors if x.get("gap_s3_ms")],
+        }
+        avg_gap = {k: sum(v) / len(v) for k, v in gaps.items() if v}
+        if avg_gap:
+            weak = max(avg_gap, key=lambda k: avg_gap[k])
+            strong = min(avg_gap, key=lambda k: avg_gap[k])
+            w_ms = avg_gap[weak]
+            s_ms = avg_gap[strong]
+            if w_ms >= 300:
+                insights.append({
+                    "icon": "sector",
+                    "tone": "red",
+                    "title": f"Tu sector más flojo es {weak}",
+                    "msg": (f"De media pierdes {(w_ms/1000):.2f}s en {weak} "
+                            f"contra el más rápido del split. Si lo recortas "
+                            f"a la mitad, ganas ~{(w_ms/2000):.2f}s por vuelta."),
+                })
+            else:
+                insights.append({
+                    "icon": "sector",
+                    "tone": "green",
+                    "title": f"Sectores equilibrados",
+                    "msg": (f"Tu peor sector ({weak}) solo te cuesta "
+                            f"{(w_ms/1000):.2f}s — buen equilibrio general."),
+                })
+
+    # --- Señal 3: última carrera ---
+    if last and last.get("finish_pos"):
+        rc = last.get("rating_change")
+        bow = last.get("best_of_week")
+        if rc is not None and rc > 0:
+            extra = " ¡Y Best of Week! ⭐" if bow else ""
+            insights.append({
+                "icon": "trophy",
+                "tone": "green",
+                "title": f"P{last['finish_pos']} en {last.get('track_name')}",
+                "msg": (f"Tu última carrera sumó +{rc:.0f} de rating "
+                        f"({last.get('event_name')}).{extra}"),
+            })
+        elif rc is not None:
+            insights.append({
+                "icon": "trophy",
+                "tone": "cyan",
+                "title": f"P{last['finish_pos']} en {last.get('track_name')}",
+                "msg": (f"Tu última carrera restó {rc:.0f} de rating "
+                        f"({last.get('event_name')}). Toca analizar qué pasó."),
+            })
+
+    # --- Qué hacer ahora ---
+    action = None
+    if avg_inc >= 10:
+        action = {
+            "icon": "target",
+            "title": "Tu prioridad: supervivencia",
+            "msg": ("Una carrera limpia (0-3 incidentes) vale más que "
+                    "10 décimas de ritmo. Corre al 90% y deja pasar las "
+                    "peleas de la primera vuelta."),
+        }
+    elif sectors:
+        gaps = {
+            "S1": [x.get("gap_s1_ms") for x in sectors if x.get("gap_s1_ms")],
+            "S2": [x.get("gap_s2_ms") for x in sectors if x.get("gap_s2_ms")],
+            "S3": [x.get("gap_s3_ms") for x in sectors if x.get("gap_s3_ms")],
+        }
+        avg_gap = {k: sum(v) / len(v) for k, v in gaps.items() if v}
+        if avg_gap:
+            weak = max(avg_gap, key=lambda k: avg_gap[k])
+            action = {
+                "icon": "target",
+                "title": f"Entrena {weak}",
+                "msg": (f"Practica {weak} en solitario hasta igualar al más "
+                        f"rápido del split — es tu mayor margen de mejora."),
+            }
+        else:
+            action = {
+                "icon": "target",
+                "title": "Sigue acumulando carreras",
+                "msg": "Cuantas más carreras limpias, más sube todo. La constancia gana.",
+            }
+    else:
+        action = {
+            "icon": "target",
+            "title": "Sigue acumulando carreras",
+            "msg": "Cuantas más carreras limpias, más sube todo. La constancia gana.",
+        }
+
+    return {
+        "profile_name": name,
+        "verdict": verdict,
+        "insights": insights,
+        "action": action,
+    }

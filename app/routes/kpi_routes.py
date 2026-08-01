@@ -17,6 +17,12 @@ def _get_profile(profile_id: int, user, db: Session) -> LfmProfile:
     return p
 
 
+@router.get("/profile/{profile_id}/insight")
+def insight(profile_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    _get_profile(profile_id, user, db)
+    return kpis.insight(db, profile_id)
+
+
 @router.get("/profile/{profile_id}/overview")
 def overview(profile_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
     _get_profile(profile_id, user, db)
