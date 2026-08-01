@@ -22,11 +22,15 @@ _MANUFACTURER_LOGOS = {
 LOGO_CDN = "https://cdn.lowfuelmotorsport.com/images/manufacturers/{name}.png"
 
 # --- Explicaciones de tipos de incidente LFM (es-ES) ---
+# Fuente: bundle JS oficial de lowfuelmotorsport.com (tabla de vueltas + leyenda SR):
+#   C -> "1x"  = Track cut (corte de pista): 1 punto de incidente, la vuelta NO cuenta
+#   D -> "4x"  = Daño/contacto (coches o muro): 4 puntos de incidente
+#   R -> "-2x" = Riego (relaunch del servidor en carrera)
 INCIDENT_EXPLAIN = {
-    "C": {"label": "Contacto", "icon": "💥",
-          "msg": "Chocaste con otro coche. Suele pasar en la primera vuelta o al pelear posición."},
-    "D": {"label": "Drive-through", "icon": "🚨",
-          "msg": "Sanción de paso por boxes: excediste límites o causaste un incidente grave."},
+    "C": {"label": "Corte de pista (cut)", "icon": "✂️",
+          "msg": "Cortaste la pista (4 ruedas fuera de los límites) y la vuelta no contó. Cuesta 1 punto de incidente."},
+    "D": {"label": "Contacto / daño", "icon": "💥",
+          "msg": "Hubo contacto con daño (otro coche o muro). Es lo que más sube tus puntos de incidente (4x)."},
     "O": {"label": "Fuera de pista", "icon": "🚧",
           "msg": "Te saliste de los límites de pista. Acumular muchos resta SR."},
     "R": {"label": "Riego (relaunch)", "icon": "🔁",
@@ -672,6 +676,11 @@ def race_story(db: Session, profile_id: int, race_pk: int):
     race_duration = acc if acc > 0 else last_lap * 120000  # fallback ~2min/vuelta
 
     incident_events = []
+    # mapa vuelta -> tiempo para detectar vueltas invalidadas por cut
+    my_laps_by_num = {}
+    for L in my_laps:
+        if L.car_lap and L.lap_time:
+            my_laps_by_num.setdefault(L.car_lap, []).append(L)
     for i in incidents:
         t = (i.incident_type or "?").upper()
         expl = INCIDENT_EXPLAIN.get(t, {"label": t, "icon": "⚠️", "msg": "Incidente registrado por LFM."})
@@ -683,11 +692,19 @@ def race_story(db: Session, profile_id: int, race_pk: int):
                 est_lap = ln
             else:
                 break
+        explanation = expl["msg"]
+        # Si es un cut: buscar la vuelta invalidada más cercana para decir su tiempo
+        if t == "C":
+            cand = my_laps_by_num.get(est_lap) or my_laps_by_num.get(est_lap + 1) or []
+            inv = [L for L in cand if not L.lap_valid and L.lap_time]
+            if inv:
+                explanation += (f" Tu vuelta {est_lap} ({inv[0].lap_time}) no contó "
+                                f"para tu mejor tiempo.")
         incident_events.append({
             "type": t,
             "type_label": expl["label"],
             "icon": expl["icon"],
-            "explanation": expl["msg"],
+            "explanation": explanation,
             "time": i.session_time,
             "server_time_ms": t_ms,
             "lap": est_lap,
