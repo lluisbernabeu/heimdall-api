@@ -664,7 +664,36 @@ def race_story(db: Session, profile_id: int, race_pk: int):
                 my_uid, my_laps = uid, ulaps
                 break
     if not my_laps:
-        return {"error": "No hay datos de vueltas para esta carrera"}
+        # Carrera sin vueltas descargadas del usuario: devolver estructura
+        # completa (con datos de la carrera) para que la app no pinte "null".
+        return {
+            "race": {
+                "id": race.id,
+                "event_name": race.event_name,
+                "track_name": race.track_name,
+                "start_pos": race.start_pos,
+                "finish_pos": race.finish_pos,
+                "incidents": race.incidents,
+                "car_name": race.car_name,
+                "car_logo": car_logo_url(race.car_name),
+                "race_date": race.race_date.isoformat() if race.race_date else None,
+            },
+            "summary": {
+                "positions_gained": (race.start_pos - race.finish_pos)
+                    if (race.start_pos and race.finish_pos) else 0,
+                "total_incidents": race.incidents or 0,
+                "first_incident_lap": None,
+                "final_lap": None,
+            },
+            "position_events": [],
+            "incidents": [],
+            "laps": [],
+            "ahead": [],
+            "my_best_lap": None,
+            "my_avg_lap": None,
+            "my_std_lap": None,
+            "no_laps": True,
+        }
 
     # --- Clasificación vuelta a vuelta (position chart REAL de LFM) ---
     # Fuente: tabla position_chart, descargada del endpoint oficial
