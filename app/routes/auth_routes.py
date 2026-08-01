@@ -130,7 +130,7 @@ def _run_sync_in_background(profile_id: int):
             return
         svc = SyncService(db)
         try:
-            svc.start_sync(profile)
+            svc.start_sync(profile, force=True)
         except SyncError as e:
             # ya registrado en el estado
             pass

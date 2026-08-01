@@ -27,6 +27,8 @@ class SyncService:
         if not st:
             st = SyncState(profile_id=profile_id)
             self.db.add(st)
+            self.db.commit()
+            self.db.refresh(st)
         return st
 
     def _update_state(self, st, **kw):
@@ -311,7 +313,7 @@ class SyncService:
 
     def start_sync(self, profile: LfmProfile, force=False):
         st = self._state(profile.id)
-        if st.status == "running":
+        if st.status == "running" and not force:
             raise SyncError("Ya hay una sincronización en curso")
 
         st.status = "running"
