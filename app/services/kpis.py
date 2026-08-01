@@ -733,7 +733,7 @@ def race_story(db: Session, profile_id: int, race_pk: int):
 
     ahead_insights = []
     if me_rank and ahead:
-        # consistencia
+        # consistencia (delta: va en segundos, es una diferencia)
         if ahead[0]["std_ms"] and me_rank["std_ms"]:
             if me_rank["std_ms"] > ahead[0]["std_ms"] * 1.5:
                 ahead_insights.append({
@@ -743,24 +743,43 @@ def race_story(db: Session, profile_id: int, race_pk: int):
                             f"Reducir tus errores te acerca a ellos más que ganar ritmo puro."),
                     "tone": "red",
                 })
-        # mejor vuelta
+        # mejor vuelta (tiempos completos: formatear m:ss.mmm)
         if ahead[0]["best_ms"] and me_rank["best_ms"]:
             gap = (me_rank["best_ms"] - ahead[0]["best_ms"]) / 1000
             if gap > 0:
                 ahead_insights.append({
                     "title": f"Te falta ritmo: {gap:.2f}s",
-                    "msg": (f"Tu mejor vuelta es {(me_rank['best_ms']/1000):.2f}s y la de "
-                            f"{ahead[0]['name']} {(ahead[0]['best_ms']/1000):.2f}s. "
-                            f"Ese gap se nota en carrera."),
+                    "msg": (f"Tu mejor vuelta es {_fmt_ms(me_rank['best_ms'])} y la de "
+                            f"{ahead[0]['name']} {_fmt_ms(ahead[0]['best_ms'])}. "
+                            f"Ese gap de {gap:.2f}s se nota en carrera."),
                     "tone": "cyan",
                 })
             else:
                 ahead_insights.append({
                     "title": "Tienes ritmo de sobra",
-                    "msg": (f"Tu mejor vuelta supera a la de {ahead[0]['name']} "
+                    "msg": (f"Tu mejor vuelta ({_fmt_ms(me_rank['best_ms'])}) supera a la de "
+                            f"{ahead[0]['name']} ({_fmt_ms(ahead[0]['best_ms'])}) "
                             f"por {abs(gap):.2f}s. El problema no es la velocidad."),
                     "tone": "green",
                 })
+
+    # --- Vuelta a vuelta: detalle completo para análisis ---
+    # Cada vuelta del usuario: tiempo, splits, posición real, incidentes.
+    laps_out = []
+    for L in sorted(my_laps, key=lambda x: x.car_lap or 0):
+        if not L.car_lap:
+            continue
+        laps_out.append({
+            "lap": L.car_lap,
+            "time": L.lap_time,
+            "time_ms": L.lap_time_ms,
+            "s1": L.s1, "s1_ms": L.s1_ms,
+            "s2": L.s2, "s2_ms": L.s2_ms,
+            "s3": L.s3, "s3_ms": L.s3_ms,
+            "valid": bool(L.lap_valid),
+            "position": my_positions.get(L.car_lap),
+            "incidents": [e for e in incident_events if e["lap"] == L.car_lap],
+        })
 
     return {
         "race": {
@@ -783,6 +802,7 @@ def race_story(db: Session, profile_id: int, race_pk: int):
         },
         "position_events": pos_events,
         "incidents": incident_events,
+        "laps": laps_out,
         "ahead": ahead_insights,
         "my_best_lap": _fmt_ms(me_rank["best_ms"]) if me_rank else None,
         "my_avg_lap": _fmt_ms(me_rank["avg_ms"]) if me_rank else None,
