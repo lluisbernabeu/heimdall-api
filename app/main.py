@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 
 from .db import init_db
 from .routes import auth_routes, kpi_routes
+from .services.scheduler import start_scheduler
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -29,6 +30,10 @@ app.include_router(kpi_routes.router)
 @app.on_event("startup")
 def on_startup():
     init_db()
+    # Backend autosuficiente: scheduler interno de sync automático (daemon).
+    # No depende de cron externo — si la app corre, se sincroniza sola cada
+    # AUTO_SYNC_INTERVAL_HOURS horas.
+    start_scheduler()
     logging.getLogger("heimdall").info("Heimdall API arrancada")
 
 

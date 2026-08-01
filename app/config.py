@@ -14,5 +14,9 @@ SYNC_RACE_LIMIT = int(os.getenv("HEIMDALL_SYNC_LIMIT", "50"))
 SYNC_LAP_RACES = int(os.getenv("HEIMDALL_LAP_RACES", "10"))
 # Reintentos máximos por carrera si falla la descarga de vueltas (backfill automático)
 SYNC_MAX_RETRIES = int(os.getenv("HEIMDALL_MAX_RETRIES", "3"))
+# Scheduler interno (backend autosuficiente): sync automático cada N horas
+AUTO_SYNC_INTERVAL_HOURS = int(os.getenv("HEIMDALL_AUTO_SYNC_HOURS", "6"))
+# Retardo inicial tras arrancar la app (segundos) antes de la primera sync
+AUTO_SYNC_STARTUP_DELAY = int(os.getenv("HEIMDALL_AUTO_SYNC_STARTUP_DELAY", "30"))
 # Delay entre llamadas a la API LFM (respetar rate limits)
 SYNC_DELAY_SECS = 0.4
