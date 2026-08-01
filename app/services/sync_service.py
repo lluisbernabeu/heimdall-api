@@ -6,7 +6,8 @@ import logging
 from datetime import datetime
 
 from ..config import SYNC_RACE_LIMIT, SYNC_LAP_RACES
-from ..models import (LfmProfile, Race, Lap, Incident, Standing, SyncState)
+from ..models import (LfmProfile, Race, Lap, Incident, Standing, SyncState,
+                      PositionChart)
 from . import lfm_client as lfm
 
 log = logging.getLogger("heimdall.sync")
@@ -258,6 +259,45 @@ class SyncService:
             ))
         self.db.commit()
 
+    def _sync_position_chart(self, race: Race):
+        """Descarga el position chart REAL de LFM (posición oficial vuelta a
+        vuelta de cada piloto del split) y lo guarda en position_chart."""
+        try:
+            data = lfm.get_position_chart(race.lfm_race_id, race.split or 1)
+        except Exception as e:
+            log.warning("positionChart %s falló: %s", race.lfm_race_id, e)
+            lfm.sleep_between_calls()
+            return
+        lfm.sleep_between_calls()
+        if not isinstance(data, list):
+            return
+        for pilot in data:
+            if not isinstance(pilot, dict):
+                continue
+            uid = pilot.get("user_id")
+            if uid is None:
+                continue
+            name = pilot.get("driver") or ""
+            for lap_entry in (pilot.get("laps") or []):
+                if not isinstance(lap_entry, dict):
+                    continue
+                lap = lap_entry.get("lap")
+                pos = lap_entry.get("position")
+                if lap is None or pos is None:
+                    continue
+                existing = (self.db.query(PositionChart)
+                            .filter_by(race_id=race.id, lfm_user_id=uid,
+                                       lap=lap).first())
+                vals = dict(driver_name=name, position=pos,
+                            pit_lap=bool(lap_entry.get("pit_lap")))
+                if existing:
+                    for k, v in vals.items():
+                        setattr(existing, k, v)
+                else:
+                    self.db.add(PositionChart(race_id=race.id, lfm_user_id=uid,
+                                              lap=lap, **vals))
+        self.db.commit()
+
     def _sync_standings(self, profile: LfmProfile, event_ids):
         for eid in event_ids:
             try:
@@ -368,6 +408,8 @@ class SyncService:
                                                f"({race.track_name})...",
                                    done_steps=2 + i)
                 self._sync_race_detail(race)
+                # Posición oficial vuelta a vuelta (narrativa "qué pasó")
+                self._sync_position_chart(race)
 
             # Fase 4: standings (eventos presentes en el historial)
             event_ids = sorted({r.get("event_id") for r in races if r.get("event_id")})

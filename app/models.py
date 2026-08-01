@@ -145,3 +145,22 @@ class SyncState(Base):
     finished_at = Column(DateTime)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_synced_race_id = Column(Integer, default=0)
+
+
+class PositionChart(Base):
+    """Posición REAL vuelta a vuelta de cada piloto (endpoint positionChart de LFM).
+
+    Fuente oficial de LFM: /api/race/{race_id}/positionChart/{split}
+    La posición por vuelta se usa en la narrativa de carrera para decir con
+    datos reales cuándo y por qué se ganó/perdió una posición.
+    """
+    __tablename__ = "position_chart"
+    id = Column(Integer, primary_key=True)
+    race_id = Column(Integer, ForeignKey("races.id"), nullable=False, index=True)
+    lfm_user_id = Column(Integer, nullable=False, index=True)
+    driver_name = Column(String(120))
+    lap = Column(Integer, nullable=False)
+    position = Column(Integer, nullable=False)
+    pit_lap = Column(Boolean, default=False)
+    __table_args__ = (UniqueConstraint("race_id", "lfm_user_id", "lap",
+                                       name="uq_race_user_lap_pos"),)

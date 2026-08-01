@@ -5,7 +5,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from ..models import LfmProfile, Race, Lap, Incident, Standing
+from ..models import LfmProfile, Race, Lap, Incident, Standing, PositionChart
 
 # --- Logos de copas/series (CDN público de LFM) ---
 # Mapea fabricante -> nombre del logo en el CDN. El fabricante se extrae
@@ -631,40 +631,22 @@ def race_story(db: Session, profile_id: int, race_pk: int):
     if not my_laps:
         return {"error": "No hay datos de vueltas para esta carrera"}
 
-    # --- Clasificación vuelta a vuelta (tiempo acumulado) ---
-    # La vuelta 1 incluye la vuelta de formación (tiempos enormes) — NO sirve
-    # para ranking. Usamos la parrilla (start_pos) como posición inicial y
-    # calculamos el ranking acumulado desde la vuelta 2.
-    cumulative = {}  # uid -> ms acumulado (solo vueltas >= 2)
-    ranking_history = {}  # lap_num -> [(uid, ms_acumulado)]
-    for L in laps:
-        if L.car_lap is None or L.car_lap < 2:
-            continue
-        if L.lap_valid and L.lap_time_ms:
-            cumulative[L.lfm_user_id] = cumulative.get(L.lfm_user_id, 0) + L.lap_time_ms
-        ranking_history.setdefault(L.car_lap, []).append(
-            (L.lfm_user_id, cumulative.get(L.lfm_user_id, 0)))
+    # --- Clasificación vuelta a vuelta (position chart REAL de LFM) ---
+    # Fuente: tabla position_chart, descargada del endpoint oficial
+    # /api/race/{race_id}/positionChart/{split}. NADA inventado.
+    chart_rows = (db.query(PositionChart)
+                  .filter_by(race_id=race.id, lfm_user_id=my_uid)
+                  .order_by(PositionChart.lap).all())
+    # posición del usuario por vuelta: lap -> position
+    my_positions = {c.lap: c.position for c in chart_rows}
 
-    # Posición del usuario en cada vuelta (>=2)
-    positions = {}
-    for lap_num, entries in ranking_history.items():
-        def _sort_key(e):
-            return e[1] if e[1] is not None else float("inf")
-        order = sorted(entries, key=_sort_key)
-        for pos, (uid, _) in enumerate(order, start=1):
-            if uid == my_uid:
-                positions[lap_num] = pos
-                break
-        else:
-            positions[lap_num] = None
-
-    # --- Eventos de posición (cambios) ---
+    # --- Eventos de posición (cambios) con datos reales ---
     pos_events = []
-    prev_pos = race.start_pos  # parrilla = posición en vuelta 1
-    for lap_num in sorted(positions):
-        cur = positions[lap_num]
-        if cur is None:
-            continue
+    prev_pos = race.start_pos  # parrilla = posición oficial en vuelta 0
+    for lap_num in sorted(my_positions):
+        cur = my_positions[lap_num]
+        if cur is None or cur == 0:
+            continue  # sin posición registrada (vuelta de formación o DNF)
         if cur != prev_pos:
             delta = prev_pos - cur if prev_pos else 0
             pos_events.append({
