@@ -101,7 +101,29 @@ def compare(profile_id: int, other_id: int, user=Depends(get_current_user),
     other = db.query(LfmProfile).filter_by(id=other_id).first()
     if not other:
         raise HTTPException(status_code=404, detail="Perfil comparado no encontrado")
-    # El otro perfil debe pertenecer al mismo usuario (sus cuentas vinculadas)
-    if other.user_id != user.id:
-        raise HTTPException(status_code=403, detail="No puedes comparar con ese perfil")
+    # Se permite comparar contra cualquier perfil del sistema (tú u otros pilotos)
     return kpis.compare(db, profile_id, other_id)
+
+
+@router.get("/profiles")
+def list_profiles(user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """Lista perfiles con datos suficientes para comparar (todo el sistema)."""
+    rows = (db.query(LfmProfile)
+            .filter(LfmProfile.username.isnot(None))
+            .order_by(LfmProfile.username)
+            .all())
+    return [
+        {
+            "id": p.id,
+            "lfm_user_id": p.lfm_user_id,
+            "username": p.username,
+            "vorname": p.vorname,
+            "nachname": p.nachname,
+            "avatar": p.avatar,
+            "license": p.license,
+            "safety_rating": p.safety_rating,
+            "team_name": p.team_name,
+            "races": db.query(Race).filter_by(profile_id=p.id).count(),
+        }
+        for p in rows
+    ]
