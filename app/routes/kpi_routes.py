@@ -61,9 +61,20 @@ def races_list(profile_id: int, user=Depends(get_current_user), db: Session = De
             "best_lap": r.best_lap,
             "best_of_week": r.best_of_week,
             "car_name": r.car_name,
+            "car_logo": kpis.car_logo_url(r.car_name),
         }
         for r in rows
     ]
+
+
+@router.get("/profile/{profile_id}/races/{race_pk}/story")
+def race_story(profile_id: int, race_pk: int, user=Depends(get_current_user),
+               db: Session = Depends(get_db)):
+    _get_profile(profile_id, user, db)
+    data = kpis.race_story(db, profile_id, race_pk)
+    if not data:
+        raise HTTPException(status_code=404, detail="Carrera no encontrada")
+    return data
 
 
 @router.get("/profile/{profile_id}/races/{race_pk}")

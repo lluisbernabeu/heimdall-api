@@ -7,6 +7,43 @@ from sqlalchemy.orm import Session
 
 from ..models import LfmProfile, Race, Lap, Incident, Standing
 
+# --- Logos de copas/series (CDN público de LFM) ---
+# Mapea fabricante -> nombre del logo en el CDN. El fabricante se extrae
+# del car_name (primera palabra). Fallback: None (la app muestra un icono).
+_MANUFACTURER_LOGOS = {
+    "mazda": "mazda", "audi": "audi", "hyundai": "hyundai", "cupra": "cupra",
+    "bmw": "bmw", "mercedes": "mercedes", "porsche": "porsche", "ferrari": "ferrari",
+    "toyota": "toyota", "volkswagen": "volkswagen", "vw": "volkswagen",
+    "seat": "seat", "honda": "honda", "ford": "ford", "renault": "renault",
+    "peugeot": "peugeot", "skoda": "skoda", "aston": "aston_martin",
+    "lamborghini": "lamborghini", "mclaren": "mclaren", "nissan": "nissan",
+    "alpine": "alpine", "alfa": "alfa_romeo", "lexus": "lexus", "corvette": "corvette",
+}
+LOGO_CDN = "https://cdn.lowfuelmotorsport.com/images/manufacturers/{name}.png"
+
+# --- Explicaciones de tipos de incidente LFM (es-ES) ---
+INCIDENT_EXPLAIN = {
+    "C": {"label": "Contacto", "icon": "💥",
+          "msg": "Chocaste con otro coche. Suele pasar en la primera vuelta o al pelear posición."},
+    "D": {"label": "Drive-through", "icon": "🚨",
+          "msg": "Sanción de paso por boxes: excediste límites o causaste un incidente grave."},
+    "O": {"label": "Fuera de pista", "icon": "🚧",
+          "msg": "Te saliste de los límites de pista. Acumular muchos resta SR."},
+    "R": {"label": "Riego (relaunch)", "icon": "🔁",
+          "msg": "Reinicio del servidor en carrera."},
+}
+
+
+def car_logo_url(car_name):
+    """Devuelve la URL del logo del fabricante a partir del car_name, o None."""
+    if not car_name:
+        return None
+    first = car_name.split()[0].lower()
+    key = _MANUFACTURER_LOGOS.get(first)
+    if not key:
+        return None
+    return LOGO_CDN.format(name=key)
+
 
 def _sec(ms):
     if ms is None:
@@ -91,6 +128,8 @@ def overview(db: Session, profile_id: int):
                 "best_lap": r.best_lap,
                 "best_of_week": r.best_of_week,
                 "points": r.points,
+                "car_name": r.car_name,
+                "car_logo": car_logo_url(r.car_name),
             }
             for r in last_races
         ],
@@ -203,7 +242,7 @@ def race_detail(db: Session, profile_id: int, race_pk: int):
             "sr_change": race.sr_change,
             "points": race.points,
             "car_name": race.car_name,
-            "car_number": race.car_number,
+            "car_logo": car_logo_url(race.car_name),
         },
         "pilots": pilots,
         "my_user_id": my_uid,
@@ -559,4 +598,194 @@ def insight(db: Session, profile_id: int):
         "verdict": verdict,
         "insights": insights,
         "action": action,
+    }
+
+
+def race_story(db: Session, profile_id: int, race_pk: int):
+    """Explica QUÉ pasó en la carrera: posición vuelta a vuelta, cuándo
+    perdiste/ganaste posiciones y por qué (vueltas lentas, incidentes,
+    sanciones). Además: qué hicieron los pilotos que quedaron por delante."""
+    race = db.query(Race).filter_by(id=race_pk, profile_id=profile_id).first()
+    if not race:
+        return None
+    profile = db.query(LfmProfile).filter_by(id=profile_id).first()
+    my_name = f"{profile.vorname or ''} {profile.nachname or ''}".strip().lower()
+    my_uid = profile.lfm_user_id
+
+    laps = (db.query(Lap).filter_by(race_id=race.id)
+            .order_by(Lap.car_lap, Lap.lfm_user_id).all())
+    by_user = {}
+    for L in laps:
+        by_user.setdefault(L.lfm_user_id, []).append(L)
+
+    # Identificar al usuario (por nombre o por lfm_user_id)
+    if my_uid in by_user:
+        my_laps = by_user[my_uid]
+    else:
+        my_laps = []
+        for uid, ulaps in by_user.items():
+            nm = (ulaps[0].driver_name or "").lower()
+            if my_name and (my_name in nm or nm in my_name):
+                my_uid, my_laps = uid, ulaps
+                break
+    if not my_laps:
+        return {"error": "No hay datos de vueltas para esta carrera"}
+
+    # --- Clasificación vuelta a vuelta (tiempo acumulado) ---
+    # La vuelta 1 incluye la vuelta de formación (tiempos enormes) — NO sirve
+    # para ranking. Usamos la parrilla (start_pos) como posición inicial y
+    # calculamos el ranking acumulado desde la vuelta 2.
+    cumulative = {}  # uid -> ms acumulado (solo vueltas >= 2)
+    ranking_history = {}  # lap_num -> [(uid, ms_acumulado)]
+    for L in laps:
+        if L.car_lap is None or L.car_lap < 2:
+            continue
+        if L.lap_valid and L.lap_time_ms:
+            cumulative[L.lfm_user_id] = cumulative.get(L.lfm_user_id, 0) + L.lap_time_ms
+        ranking_history.setdefault(L.car_lap, []).append(
+            (L.lfm_user_id, cumulative.get(L.lfm_user_id, 0)))
+
+    # Posición del usuario en cada vuelta (>=2)
+    positions = {}
+    for lap_num, entries in ranking_history.items():
+        def _sort_key(e):
+            return e[1] if e[1] is not None else float("inf")
+        order = sorted(entries, key=_sort_key)
+        for pos, (uid, _) in enumerate(order, start=1):
+            if uid == my_uid:
+                positions[lap_num] = pos
+                break
+        else:
+            positions[lap_num] = None
+
+    # --- Eventos de posición (cambios) ---
+    pos_events = []
+    prev_pos = race.start_pos  # parrilla = posición en vuelta 1
+    for lap_num in sorted(positions):
+        cur = positions[lap_num]
+        if cur is None:
+            continue
+        if cur != prev_pos:
+            delta = prev_pos - cur if prev_pos else 0
+            pos_events.append({
+                "lap": lap_num,
+                "from_pos": prev_pos,
+                "to_pos": cur,
+                "delta": delta,  # positivo = ganaste posiciones
+            })
+            prev_pos = cur
+
+    # --- Incidentes del usuario con explicación + vuelta aproximada ---
+    incidents = (db.query(Incident).filter_by(race_id=race.id, lfm_user_id=my_uid)
+                 .order_by(Incident.server_time_ms).all())
+    # estimar vuelta desde server_time_ms: la vuelta 1 empieza en 0 y cada
+    # vuelta dura ~ mejor tiempo medio. Usamos el tiempo acumulado del usuario.
+    lap_start_ms = {}
+    acc = 0
+    for L in sorted(my_laps, key=lambda x: x.car_lap or 0):
+        lap_start_ms[L.car_lap] = acc
+        if L.lap_time_ms:
+            acc += L.lap_time_ms
+    last_lap = max([L.car_lap for L in my_laps if L.car_lap], default=1)
+    race_duration = acc if acc > 0 else last_lap * 120000  # fallback ~2min/vuelta
+
+    incident_events = []
+    for i in incidents:
+        t = (i.incident_type or "?").upper()
+        expl = INCIDENT_EXPLAIN.get(t, {"label": t, "icon": "⚠️", "msg": "Incidente registrado por LFM."})
+        t_ms = i.server_time_ms or 0
+        # estimar vuelta por el tiempo de carrera transcurrido
+        est_lap = 1
+        for ln, start in sorted(lap_start_ms.items()):
+            if t_ms >= start:
+                est_lap = ln
+            else:
+                break
+        incident_events.append({
+            "type": t,
+            "type_label": expl["label"],
+            "icon": expl["icon"],
+            "explanation": expl["msg"],
+            "time": i.session_time,
+            "server_time_ms": t_ms,
+            "lap": est_lap,
+        })
+
+    # --- Qué hicieron los que quedaron delante (top 3 del split) ---
+    # Mejor vuelta, consistencia e incidentes de los 3 primeros del ranking final
+    final_rank = []
+    for uid, ulaps in by_user.items():
+        valid = [L for L in ulaps if L.lap_valid and L.lap_time_ms]
+        if not valid:
+            continue
+        times = [L.lap_time_ms for L in valid]
+        final_rank.append({
+            "user_id": uid,
+            "name": ulaps[0].driver_name or str(uid),
+            "best_ms": min(times),
+            "avg_ms": round(statistics.mean(times), 1),
+            "std_ms": round(statistics.pstdev(times), 1),
+            "laps": len(times),
+            "is_me": uid == my_uid,
+        })
+    final_rank.sort(key=lambda x: x["best_ms"])
+    ahead = [p for p in final_rank if not p["is_me"]][:3]
+    me_rank = next((p for p in final_rank if p["is_me"]), None)
+
+    ahead_insights = []
+    if me_rank and ahead:
+        # consistencia
+        if ahead[0]["std_ms"] and me_rank["std_ms"]:
+            if me_rank["std_ms"] > ahead[0]["std_ms"] * 1.5:
+                ahead_insights.append({
+                    "title": "Son más consistentes",
+                    "msg": (f"Tu desviación por vuelta es {me_rank['std_ms']/1000:.2f}s, "
+                            f"frente a {(ahead[0]['std_ms']/1000):.2f}s de {ahead[0]['name']}. "
+                            f"Reducir tus errores te acerca a ellos más que ganar ritmo puro."),
+                    "tone": "red",
+                })
+        # mejor vuelta
+        if ahead[0]["best_ms"] and me_rank["best_ms"]:
+            gap = (me_rank["best_ms"] - ahead[0]["best_ms"]) / 1000
+            if gap > 0:
+                ahead_insights.append({
+                    "title": f"Te falta ritmo: {gap:.2f}s",
+                    "msg": (f"Tu mejor vuelta es {(me_rank['best_ms']/1000):.2f}s y la de "
+                            f"{ahead[0]['name']} {(ahead[0]['best_ms']/1000):.2f}s. "
+                            f"Ese gap se nota en carrera."),
+                    "tone": "cyan",
+                })
+            else:
+                ahead_insights.append({
+                    "title": "Tienes ritmo de sobra",
+                    "msg": (f"Tu mejor vuelta supera a la de {ahead[0]['name']} "
+                            f"por {abs(gap):.2f}s. El problema no es la velocidad."),
+                    "tone": "green",
+                })
+
+    return {
+        "race": {
+            "id": race.id,
+            "event_name": race.event_name,
+            "track_name": race.track_name,
+            "start_pos": race.start_pos,
+            "finish_pos": race.finish_pos,
+            "incidents": race.incidents,
+            "car_name": race.car_name,
+            "car_logo": car_logo_url(race.car_name),
+            "race_date": race.race_date.isoformat() if race.race_date else None,
+        },
+        "summary": {
+            "positions_gained": race.start_pos - race.finish_pos
+                if (race.start_pos and race.finish_pos) else 0,
+            "total_incidents": race.incidents or 0,
+            "first_incident_lap": next((e["lap"] for e in incident_events), None),
+            "final_lap": last_lap,
+        },
+        "position_events": pos_events,
+        "incidents": incident_events,
+        "ahead": ahead_insights,
+        "my_best_lap": _fmt_ms(me_rank["best_ms"]) if me_rank else None,
+        "my_avg_lap": _fmt_ms(me_rank["avg_ms"]) if me_rank else None,
+        "my_std_lap": _fmt_ms(me_rank["std_ms"]) if me_rank else None,
     }
