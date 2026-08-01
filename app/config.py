@@ -12,5 +12,7 @@ LFM_API_BASE = "https://api3.lowfuelmotorsport.com"
 SYNC_RACE_LIMIT = int(os.getenv("HEIMDALL_SYNC_LIMIT", "50"))
 # Vueltas detalladas (todos los pilotos del split) solo de las últimas N carreras
 SYNC_LAP_RACES = int(os.getenv("HEIMDALL_LAP_RACES", "10"))
+# Reintentos máximos por carrera si falla la descarga de vueltas (backfill automático)
+SYNC_MAX_RETRIES = int(os.getenv("HEIMDALL_MAX_RETRIES", "3"))
 # Delay entre llamadas a la API LFM (respetar rate limits)
 SYNC_DELAY_SECS = 0.4

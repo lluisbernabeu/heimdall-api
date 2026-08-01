@@ -73,6 +73,7 @@ class Race(Base):
     dns = Column(Boolean, default=False)
     dsq = Column(Boolean, default=False)
     session_running = Column(Boolean, default=False)
+    lap_retry_count = Column(Integer, default=0)
     profile = relationship("LfmProfile", back_populates="races")
     laps_detail = relationship("Lap", back_populates="race", cascade="all, delete-orphan")
     incidents_detail = relationship("Incident", back_populates="race", cascade="all, delete-orphan")

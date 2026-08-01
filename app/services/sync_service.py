@@ -5,7 +5,7 @@
 import logging
 from datetime import datetime
 
-from ..config import SYNC_RACE_LIMIT, SYNC_LAP_RACES
+from ..config import SYNC_RACE_LIMIT, SYNC_LAP_RACES, SYNC_MAX_RETRIES
 from ..models import (LfmProfile, Race, Lap, Incident, Standing, SyncState,
                       PositionChart)
 from . import lfm_client as lfm
@@ -93,13 +93,30 @@ class SyncService:
         lfm.sleep_between_calls()
 
     def _sync_races(self, profile: LfmProfile, st: SyncState, limit: int):
-        try:
-            races = lfm.get_user_past_races(profile.lfm_user_id, start=0, limit=limit)
-        except Exception as e:
-            raise SyncError(f"No se pudo obtener el historial: {e}")
-        if not isinstance(races, list):
-            races = []
-        lfm.sleep_between_calls()
+        """Descarga el historial COMPLETO de carreras paginando (LFM devuelve
+        como máximo `limit` por página; se recorre hasta agotar el historial)."""
+        races = []
+        start = 0
+        page = limit if limit > 0 else 50
+        while True:
+            try:
+                batch = lfm.get_user_past_races(profile.lfm_user_id, start=start, limit=page)
+            except Exception as e:
+                if not races:
+                    raise SyncError(f"No se pudo obtener el historial: {e}")
+                log.warning("historial página %d falló (continúo con %d carreras): %s",
+                            start, len(races), e)
+                break
+            if not isinstance(batch, list) or not batch:
+                break
+            races.extend(batch)
+            lfm.sleep_between_calls()
+            if len(batch) < page:
+                break  # última página
+            start += page
+            # Techo de seguridad: nunca más de 10 páginas (500 carreras)
+            if start >= page * 10:
+                break
         return races
 
     def _upsert_race(self, profile: LfmProfile, r) -> Race:
@@ -157,6 +174,8 @@ class SyncService:
             data = lfm.get_race(race.lfm_race_id)
         except Exception as e:
             log.warning("race %s detalle falló: %s", race.lfm_race_id, e)
+            race.lap_retry_count = (race.lap_retry_count or 0) + 1
+            self.db.commit()
             return
         lfm.sleep_between_calls()
 
@@ -386,9 +405,11 @@ class SyncService:
                 raise SyncError("LFM no devolvió carreras para este usuario")
             self._update_state(st, done_steps=2)
 
-            # Fase 3: detalles (solo carreras nuevas o incompletas)
-            # Procesamos vueltas de todos los pilotos solo en las últimas SYNC_LAP_RACES;
-            # el resto solo guarda el resumen (ya en Fase 2) sin detalle.
+            # Fase 3: detalles (TODAS las carreras sin vueltas)
+            # - Las SYNC_LAP_RACES más recientes: detalle completo (todos los pilotos)
+            # - El resto: solo las vueltas del propio usuario (no saturar la API)
+            # - Reintentos: las que fallaron antes (lap_retry_count) se vuelven a
+            #   intentar hasta SYNC_MAX_RETRIES veces; force=True lo resetea todo.
             total = len(races)
             st.total_steps = 2 + total
             self._update_state(st, phase="Carreras",
@@ -401,16 +422,23 @@ class SyncService:
                 if race.id not in [x.id for x in new_races]:
                     new_races.append(race)
 
-            # Detallar TODAS las carreras sin vueltas: las SYNC_LAP_RACES más
-            # recientes con detalle completo (todos los pilotos); las más antiguas
-            # solo con las vueltas del propio usuario (no saturar la API de LFM).
-            # Así el histórico se rellena por completo aunque las carreras
-            # antiguas se quedaron fuera del límite de detalle en síncronos previos.
+            max_retries = SYNC_MAX_RETRIES if SYNC_MAX_RETRIES > 0 else 1
             detail_targets = []
             for i, race in enumerate(new_races):
                 has_laps = self.db.query(Lap).filter_by(race_id=race.id).first()
-                if not has_laps:
-                    detail_targets.append((i, race))
+                if has_laps:
+                    # Ya tiene vueltas: resetear contador de reintentos
+                    if race.lap_retry_count:
+                        race.lap_retry_count = 0
+                        self.db.commit()
+                    continue
+                retries = race.lap_retry_count or 0
+                if not force and retries >= max_retries:
+                    log.warning("race %s (%s) sin vueltas tras %d intentos; se salta "
+                                "(usa force=True para resetear)", race.id,
+                                race.track_name, retries)
+                    continue
+                detail_targets.append((i, race))
 
             for i, race in detail_targets:
                 only_me = i >= SYNC_LAP_RACES if SYNC_LAP_RACES > 0 else True

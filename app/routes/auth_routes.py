@@ -121,7 +121,7 @@ def link_lfm_url(body: LinkLfmUrlIn, user: User = Depends(get_current_user),
     return {"id": profile.id, "already": False, "lfm_user_id": uid}
 
 
-def _run_sync_in_background(profile_id: int):
+def _run_sync_in_background(profile_id: int, force: bool = False):
     """Ejecuta la sync con su propia sesión BD (thread de background)."""
     db = SessionLocal()
     try:
@@ -130,7 +130,7 @@ def _run_sync_in_background(profile_id: int):
             return
         svc = SyncService(db)
         try:
-            svc.start_sync(profile, force=True)
+            svc.start_sync(profile, force=force)
         except SyncError as e:
             # ya registrado en el estado
             pass
@@ -141,7 +141,7 @@ def _run_sync_in_background(profile_id: int):
 
 
 @router.post("/profile/{profile_id}/sync")
-def start_sync(profile_id: int, background: BackgroundTasks,
+def start_sync(profile_id: int, background: BackgroundTasks, force: bool = False,
                user: User = Depends(get_current_user),
                db: Session = Depends(get_db)):
     profile = db.query(LfmProfile).filter_by(id=profile_id, user_id=user.id).first()
@@ -158,8 +158,8 @@ def start_sync(profile_id: int, background: BackgroundTasks,
         db.add(state)
     state.status = "running"
     db.commit()
-    background.add_task(_run_sync_in_background, profile.id)
-    return {"started": True, "status": "running"}
+    background.add_task(_run_sync_in_background, profile.id, force)
+    return {"started": True, "status": "running", "force": force}
 
 
 @router.get("/profile/{profile_id}/sync/status")
