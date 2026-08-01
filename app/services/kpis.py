@@ -343,12 +343,18 @@ def consistency_analysis(db: Session, profile_id: int):
 
 
 def incidents_heatmap(db: Session, profile_id: int):
-    """Distribución de incidentes: minuto de carrera y tipo."""
+    """Distribución de incidentes: minuto de carrera y tipo.
+    SOLO los incidentes del piloto (antes contaba los de todo el split)."""
+    prof = db.query(LfmProfile).filter_by(id=profile_id).first()
+    if not prof:
+        return {"by_minute": {}, "by_type": {}, "total": 0}
     races = (db.query(Race.id).filter_by(profile_id=profile_id)).all()
     race_ids = [r[0] for r in races]
     if not race_ids:
         return {"by_minute": {}, "by_type": {}, "total": 0}
-    incs = (db.query(Incident).filter(Incident.race_id.in_(race_ids))
+    incs = (db.query(Incident)
+            .filter(Incident.race_id.in_(race_ids))
+            .filter(Incident.lfm_user_id == prof.lfm_user_id)
             .filter(Incident.server_time_ms.isnot(None)).all())
     by_minute = {}
     by_type = {}

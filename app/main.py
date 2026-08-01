@@ -1,7 +1,9 @@
 # Heimdall API — entrypoint FastAPI
 import logging
-from fastapi import FastAPI
+import os
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from .db import init_db
 from .routes import auth_routes, kpi_routes
@@ -33,3 +35,20 @@ def on_startup():
 @app.get("/health")
 def health():
     return {"status": "ok", "app": "Heimdall"}
+
+
+# Descarga de builds: /download/heimdall-v8.apk
+# Sirve los APK desde /root/proyectos/heimdall-app/build/app/outputs/flutter-apk/
+_BUILD_DIR = "/root/proyectos/heimdall-app/build/app/outputs/flutter-apk"
+
+
+@app.get("/download/{filename}")
+def download_build(filename: str):
+    """Descarga directa de un build (APK). Sin auth: son builds públicos del proyecto."""
+    if ".." in filename or "/" in filename:
+        raise HTTPException(status_code=400, detail="Nombre inválido")
+    path = os.path.join(_BUILD_DIR, filename)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Build no encontrado")
+    return FileResponse(path, media_type="application/vnd.android.package-archive",
+                        filename=filename)
