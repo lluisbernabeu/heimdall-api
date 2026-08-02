@@ -294,21 +294,27 @@ def sectors_analysis(db: Session, profile_id: int):
         my_s1 = min((L.s1_ms for L in mine if L.lap_valid and L.s1_ms), default=None)
         my_s2 = min((L.s2_ms for L in mine if L.lap_valid and L.s2_ms), default=None)
         my_s3 = min((L.s3_ms for L in mine if L.lap_valid and L.s3_ms), default=None)
+        g1 = (my_s1 - best_s1) if (my_s1 and best_s1) else None
+        g2 = (my_s2 - best_s2) if (my_s2 and best_s2) else None
+        g3 = (my_s3 - best_s3) if (my_s3 and best_s3) else None
+        gaps = [g for g in (g1, g2, g3) if g is not None]
         out.append({
             "race_id": race.id,
             "event_name": race.event_name,
             "track_name": race.track_name,
             "race_date": race.race_date.isoformat() if race.race_date else None,
             "split": race.split,
+            "laps": len([L for L in mine if L.lap_valid]),
             "my_s1": _fmt_ms(my_s1), "my_s1_ms": my_s1,
             "my_s2": _fmt_ms(my_s2), "my_s2_ms": my_s2,
             "my_s3": _fmt_ms(my_s3), "my_s3_ms": my_s3,
             "best_s1": _fmt_ms(best_s1), "best_s1_ms": best_s1,
             "best_s2": _fmt_ms(best_s2), "best_s2_ms": best_s2,
             "best_s3": _fmt_ms(best_s3), "best_s3_ms": best_s3,
-            "gap_s1_ms": (my_s1 - best_s1) if (my_s1 and best_s1) else None,
-            "gap_s2_ms": (my_s2 - best_s2) if (my_s2 and best_s2) else None,
-            "gap_s3_ms": (my_s3 - best_s3) if (my_s3 and best_s3) else None,
+            "gap_s1_ms": g1,
+            "gap_s2_ms": g2,
+            "gap_s3_ms": g3,
+            "total_gap_ms": round(sum(gaps), 1) if gaps else None,
         })
     return out
 
@@ -389,6 +395,72 @@ def incidents_heatmap(db: Session, profile_id: int):
     # Orden: más incidentes primero
     by_race_list.sort(key=lambda x: -x["total"])
     return {"by_minute": by_minute, "by_type": by_type, "by_race": by_race_list, "total": len(incs)}
+
+
+def incidents_detail(db: Session, profile_id: int, race_pk: int):
+    """Incidentes individuales de UNA carrera del piloto, con vuelta estimada.
+
+    La vuelta se estima acumulando los tiempos de vuelta del propio piloto:
+    el incidente ocurre en la vuelta cuyo rango de tiempo de sesión contiene
+    server_time_ms. Si ocurre antes de completar la vuelta 1 -> vuelta 1.
+    """
+    race = db.query(Race).filter_by(id=race_pk, profile_id=profile_id).first()
+    if not race:
+        return None
+    prof = db.query(LfmProfile).filter_by(id=profile_id).first()
+    if not prof:
+        return None
+    my_name = _profile_name(db, profile_id).lower()
+    laps = (db.query(Lap).filter_by(race_id=race.id)
+            .order_by(Lap.car_lap).all())
+    mine = [L for L in laps if my_name in (L.driver_name or "").lower()
+            and L.lap_valid and L.lap_time_ms]
+    # acumulado de tiempo de sesión por vuelta (inicio de cada vuelta)
+    bounds = []
+    acc = 0
+    for L in mine:
+        bounds.append((acc, L.car_lap))
+        acc += L.lap_time_ms or 0
+    bounds.append((acc, (mine[-1].car_lap or 0) + 1))  # cierre
+
+    def _lap_of(ts):
+        if ts is None:
+            return None
+        for i in range(len(bounds) - 1):
+            if bounds[i][0] <= ts < bounds[i + 1][0]:
+                return bounds[i][1]
+        return bounds[-1][1] if bounds else None
+
+    incs = (db.query(Incident).filter_by(race_id=race.id, lfm_user_id=prof.lfm_user_id)
+            .order_by(Incident.server_time_ms).all())
+    out = []
+    for i in incs:
+        out.append({
+            "type": i.incident_type,
+            "session_time": i.session_time,
+            "server_time_ms": i.server_time_ms,
+            "lap": _lap_of(i.server_time_ms),
+        })
+    counts = {}
+    for i in out:
+        t = i["type"] or "?"
+        counts[t] = counts.get(t, 0) + 1
+    return {
+        "race": {
+            "id": race.id,
+            "event_name": race.event_name,
+            "track_name": race.track_name,
+            "race_date": race.race_date.isoformat() if race.race_date else None,
+            "split": race.split,
+            "finish_pos": race.finish_pos,
+            "start_pos": race.start_pos,
+            "laps": race.laps,
+            "incidents": race.incidents,
+        },
+        "total": len(out),
+        "counts": counts,
+        "items": out,
+    }
 
 
 def standings_view(db: Session, profile_id: int):

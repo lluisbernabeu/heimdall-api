@@ -109,6 +109,16 @@ def incidents(profile_id: int, user=Depends(get_current_user), db: Session = Dep
     return kpis.incidents_heatmap(db, profile_id)
 
 
+@router.get("/profile/{profile_id}/incidents/{race_pk}")
+def incidents_detail(profile_id: int, race_pk: int, user=Depends(get_current_user),
+                     db: Session = Depends(get_db)):
+    _get_profile(profile_id, user, db)
+    data = kpis.incidents_detail(db, profile_id, race_pk)
+    if not data:
+        raise HTTPException(status_code=404, detail="Carrera no encontrada")
+    return data
+
+
 @router.get("/profile/{profile_id}/standings")
 def standings(profile_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
     _get_profile(profile_id, user, db)
