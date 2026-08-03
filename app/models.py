@@ -34,6 +34,8 @@ class LfmProfile(Base):
     cc_rating = Column(Integer)
     team_name = Column(String(120))
     team_logo = Column(Text)
+    rating_by_sim = Column(JSON)  # rating/licencia/división por simulador
+    achievements_json = Column(JSON)  # logros completos del piloto
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     user = relationship("User", back_populates="profiles")
@@ -78,6 +80,22 @@ class Race(Base):
     laps_detail = relationship("Lap", back_populates="race", cascade="all, delete-orphan")
     incidents_detail = relationship("Incident", back_populates="race", cascade="all, delete-orphan")
     __table_args__ = (UniqueConstraint("profile_id", "lfm_race_id", name="uq_profile_race"),)
+
+
+class Track(Base):
+    """Perfil de circuito cacheado desde LFM (mapa, curvas, km)."""
+    __tablename__ = "tracks"
+    track_id = Column(Integer, primary_key=True)
+    track_name = Column(String(120))
+    track_year = Column(Integer)
+    acc_track_name = Column(String(200))
+    thumbnail = Column(String(500))
+    trackmap = Column(String(500))
+    country = Column(String(10))
+    turns = Column(Integer)
+    km = Column(Integer)
+    city = Column(String(120))
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class Lap(Base):
@@ -165,3 +183,83 @@ class PositionChart(Base):
     pit_lap = Column(Boolean, default=False)
     __table_args__ = (UniqueConstraint("race_id", "lfm_user_id", "lap",
                                        name="uq_race_user_lap_pos"),)
+
+
+class ScheduleCache(Base):
+    """Calendario de temporada cacheado desde LFM (getMinifiedSeasonBySim +
+    getSeasonWeeks). Guardado en BD para no depender de la API de LFM:
+    si LFM falla, servimos lo último que descargamos.
+    """
+    __tablename__ = "schedule_cache"
+    id = Column(Integer, primary_key=True)
+    sim_id = Column(Integer, nullable=False, unique=True, index=True)
+    season_name = Column(String(60))
+    season_week = Column(Integer)
+    payload = Column(JSON)  # serie -> semanas/carreras/coches
+    fetched_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ApiCache(Base):
+    """Caché genérica de endpoints LFM auxiliares (getCars, getSeasonWeeks).
+    key = identidad del recurso; payload JSON; fetched_at para TTL.
+    El calendario ya no llama a LFM en cada request: sirve de BD y el
+    scheduler refresca cuando toca.
+    """
+    __tablename__ = "api_cache"
+    id = Column(Integer, primary_key=True)
+    key = Column(String(120), nullable=False, unique=True, index=True)
+    payload = Column(JSON)
+    fetched_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TrackRecord(Base):
+    """Récord oficial LFM por circuito + clase de coche (qualifying/carrera).
+    Cacheado en BD para sobrevivir a caídas de la API de LFM.
+    """
+    __tablename__ = "track_records"
+    id = Column(Integer, primary_key=True)
+    track_name = Column(String(120), index=True)
+    car_class = Column(String(60))
+    mode = Column(String(20))          # qualifying | race
+    lap = Column(String(20))
+    lap_ms = Column(Integer)
+    driver = Column(String(120))
+    origin = Column(String(10))
+    car = Column(String(120))
+    date = Column(String(20))
+    fetched_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = (UniqueConstraint("track_name", "car_class", "mode",
+                                       name="uq_track_class_mode"),)
+
+
+class TrackVideo(Base):
+    """Video de YouTube (track guide/hotlap) cacheado por circuito.
+    La búsqueda con yt-dlp es lenta (~8s), así que se guarda en BD y solo
+    se refresca si el cache caduca (24h)."""
+    __tablename__ = "track_videos"
+    id = Column(Integer, primary_key=True)
+    track_name = Column(String(120), index=True)
+    car_class = Column(String(60))
+    video_id = Column(String(40), nullable=False)
+    title = Column(String(300))
+    channel = Column(String(150))
+    duration = Column(Integer)
+    url = Column(String(300))
+    thumbnail = Column(String(300))
+    fetched_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = (UniqueConstraint("video_id", name="uq_video_id"),)
+
+
+class RaceReplay(Base):
+    """Replay de datos de una carrera LFM: positionChart (posición vuelta a
+    vuelta de todos), lapDetails (vueltas con splits de pilotos clave) y
+    enlaces de VOD/stream si la carrera fue transmitida. Cacheado en BD para
+    sobrevivir a caídas de la API de LFM (patrón Heimdall)."""
+    __tablename__ = "race_replays"
+    id = Column(Integer, primary_key=True)
+    lfm_race_id = Column(Integer, nullable=False, index=True)
+    split = Column(Integer, default=1)
+    payload = Column(JSON)
+    fetched_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__ = (UniqueConstraint("lfm_race_id", "split",
+                                       name="uq_race_split"),)

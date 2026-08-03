@@ -3,9 +3,10 @@
 import statistics
 from datetime import datetime
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..models import LfmProfile, Race, Lap, Incident, Standing, PositionChart
+from ..models import LfmProfile, Race, Lap, Incident, Standing, PositionChart, Track
 
 # --- Logos de copas/series (CDN público de LFM) ---
 # Mapea fabricante -> nombre del logo en el CDN. El fabricante se extrae
@@ -88,6 +89,7 @@ def overview(db: Session, profile_id: int):
     # último split y evolución
     last_races = races[:10]
     return {
+        "profile_id": profile.id,
         "profile": {
             "lfm_user_id": profile.lfm_user_id,
             "username": profile.username,
@@ -320,7 +322,12 @@ def sectors_analysis(db: Session, profile_id: int):
 
 
 def consistency_analysis(db: Session, profile_id: int):
-    """Desviación estándar de tiempos por carrera (solo vueltas válidas) -> consistencia."""
+    """Desviación estándar de tiempos por carrera (solo vueltas válidas) -> consistencia.
+
+    La vuelta 1 se excluye del cálculo de σ: siempre es caos (salida, tráfico,
+    neumáticos fríos) y no representa el ritmo real. Se devuelve aparte como
+    first_lap_ms para que la app la muestre como referencia.
+    """
     races = (db.query(Race).filter_by(profile_id=profile_id)
              .filter(Race.race_date.isnot(None))
              .order_by(Race.race_date.asc()).all())
@@ -328,17 +335,30 @@ def consistency_analysis(db: Session, profile_id: int):
     out = []
     for race in races:
         laps = db.query(Lap).filter_by(race_id=race.id).all()
-        mine = [L for L in laps if my_name in (L.driver_name or "").lower()
-                and L.lap_valid and L.lap_time_ms]
+        pilot_laps = [L for L in laps if my_name in (L.driver_name or "").lower()]
+        mine = [L for L in pilot_laps if L.lap_valid and L.lap_time_ms]
         if len(mine) < 3:
             continue
-        times = [L.lap_time_ms for L in mine]
+        # La vuelta 1 (salida) se excluye SIEMPRE de la σ: es caos (parado,
+        # tráfico, neumáticos fríos) y no representa el ritmo. Se busca entre
+        # todas las vueltas del piloto (aunque sea inválida) para mostrarla
+        # como referencia en la app.
+        first_lap = next((L for L in pilot_laps if L.car_lap == 1), None)
+        # Vueltas normales: válidas menos la vuelta 1.
+        rest = [L for L in mine if L.car_lap != 1]
+        # Si al excluir la vuelta 1 quedan <3 vueltas, usar todas (carrera corta).
+        if len(rest) < 3:
+            rest = mine
+        times = [L.lap_time_ms for L in rest]
         out.append({
             "race_id": race.id,
             "event_name": race.event_name,
             "track_name": race.track_name,
             "race_date": race.race_date.isoformat() if race.race_date else None,
             "laps": len(times),
+            "laps_total": len([L for L in pilot_laps if L.lap_time_ms]),
+            "first_lap_ms": first_lap.lap_time_ms if first_lap else None,
+            "first_excluded": first_lap is not None,
             "avg_ms": round(statistics.mean(times), 1),
             "std_ms": round(statistics.pstdev(times), 1),
             "best_ms": min(times),
@@ -939,4 +959,211 @@ def race_story(db: Session, profile_id: int, race_pk: int):
         "my_best_lap": _fmt_ms(me_rank["best_ms"]) if me_rank else None,
         "my_avg_lap": _fmt_ms(me_rank["avg_ms"]) if me_rank else None,
         "my_std_lap": _fmt_ms(me_rank["std_ms"]) if me_rank else None,
+    }
+
+
+def _get_or_fetch_track(db: Session, track_name: str):
+    """Perfil del circuito desde la caché local o llamando a LFM una vez.
+    track_id no se guarda en la BD, así que cacheamos por nombre exacto."""
+    from . import lfm_client as lfm
+    t = db.query(Track).filter_by(track_name=track_name).first()
+    if t:
+        return t
+    try:
+        # Buscar una carrera reciente con ese track para obtener el perfil
+        race = (db.query(Race).filter_by(track_name=track_name)
+                .order_by(Race.race_date.desc()).first())
+        if not race:
+            return None
+        data = lfm.get_race(race.lfm_race_id)
+        tr = data.get("track") or {}
+        if not tr.get("track_name"):
+            return None
+        t = Track(
+            track_id=tr.get("track_id"),
+            track_name=tr.get("track_name") or track_name,
+            track_year=tr.get("track_year"),
+            acc_track_name=tr.get("acc_track_name"),
+            thumbnail=tr.get("thumbnail"),
+            trackmap=tr.get("trackmap"),
+            country=tr.get("country"),
+            turns=tr.get("turns"),
+            km=tr.get("km"),
+            city=tr.get("city"),
+        )
+        db.add(t)
+        db.commit()
+        db.refresh(t)
+        return t
+    except Exception:
+        db.rollback()
+        return None
+
+
+def circuit_analysis(db: Session, profile_id: int, track_name: str | None = None):
+    """Vista Circuito: perfil del circuito + tu mejor vuelta desglosada por
+    sector vs el más rápido del split + récords históricos por circuito/coche.
+
+    Nivel de detalle disponible en LFM: solo S1/S2/S3 (no hay curvas/rectas).
+    Si track_name se omite, usa la última carrera con vueltas detalladas.
+    """
+    me = db.query(LfmProfile).filter_by(id=profile_id).first()
+    if not me:
+        return None
+    my_name = f"{me.vorname or ''} {me.nachname or ''}".strip().lower()
+
+    # Lista de circuitos donde ha corrido este perfil (para el selector)
+    avail_rows = (db.query(Race.track_name, func.count(func.distinct(Race.id)).label('n_races'),
+                           func.count(Lap.id).label('n_laps'))
+                  .join(Lap, Lap.race_id == Race.id)
+                  .filter(Race.profile_id == profile_id, Race.track_name.isnot(None))
+                  .group_by(Race.track_name)
+                  .order_by(func.count(func.distinct(Race.id)).desc(), func.count(Lap.id).desc())
+                  .all())
+    available_tracks = []
+    for r in avail_rows:
+        t = _get_or_fetch_track(db, r.track_name)
+        available_tracks.append({
+            "name": r.track_name,
+            "races": r.n_races,
+            "laps": r.n_laps,
+            "country": t.country if t else None,
+            "turns": t.turns if t else None,
+            "km": t.km if t else None,
+        })
+
+    # Última carrera con vueltas detalladas (del track elegido o la más reciente)
+    q = (db.query(Race).filter_by(profile_id=profile_id)
+         .join(Lap, Lap.race_id == Race.id))
+    if track_name:
+        q = q.filter(Race.track_name == track_name)
+    race = q.order_by(Race.race_date.desc()).first()
+    if not race:
+        return None
+
+    track = _get_or_fetch_track(db, race.track_name) if race.track_name else None
+    track_info = None
+    if track:
+        track_info = {
+            "track_id": track.track_id,
+            "track_name": track.track_name,
+            "track_year": track.track_year,
+            "acc_track_name": track.acc_track_name,
+            "thumbnail": track.thumbnail,
+            "trackmap": track.trackmap,
+            "country": track.country,
+            "turns": track.turns,
+            "km": track.km,
+            "city": track.city,
+        }
+
+    # --- Desglose de la última carrera: tu mejor vuelta vs el más rápido ---
+    laps = db.query(Lap).filter_by(race_id=race.id).all()
+    mine = [L for L in laps if my_name in (L.driver_name or "").lower()
+            and L.lap_valid and L.lap_time_ms]
+    others = [L for L in laps if my_name not in (L.driver_name or "").lower()
+              and L.lap_valid and L.lap_time_ms]
+
+    # Fallback: si la última carrera no tiene vueltas de rivales (sync antiguo
+    # con only_me=True), usar como referencia el más rápido en este
+    # circuito+coche de CUALQUIER carrera descargada.
+    fastest_source = "race"
+    if not others:
+        any_laps = (db.query(Lap)
+                    .join(Race, Race.id == Lap.race_id)
+                    .filter(Race.track_name == race.track_name,
+                            Race.car_name == race.car_name,
+                            Lap.lap_valid == True,  # noqa
+                            Lap.lap_time_ms.isnot(None))
+                    .all())
+        others = [L for L in any_laps
+                  if my_name not in (L.driver_name or "").lower()
+                  and L.lap_valid and L.lap_time_ms]
+        if others:
+            fastest_source = "record"
+
+    def best_sector(laps_list, attr):
+        vals = [getattr(L, attr) for L in laps_list if getattr(L, attr)]
+        return min(vals) if vals else None
+
+    my_best = min((L.lap_time_ms for L in mine), default=None)
+    fastest = min((L.lap_time_ms for L in others), default=None)
+    fastest_lap = min(others, key=lambda L: L.lap_time_ms) if others else None
+
+    race_breakdown = {
+        "race_id": race.id,
+        "race_date": race.race_date.isoformat() if race.race_date else None,
+        "event_name": race.event_name,
+        "car_name": race.car_name,
+        "car_logo": car_logo_url(race.car_name),
+        "fastest_source": fastest_source,
+        "my_best_ms": my_best,
+        "my_best_fmt": _fmt_ms(my_best) if my_best else None,
+        "fastest_ms": fastest,
+        "fastest_fmt": _fmt_ms(fastest) if fastest else None,
+        "fastest_driver": f"{fastest_lap.driver_name}" if fastest_lap else None,
+        "gap_ms": (my_best - fastest) if (my_best and fastest) else None,
+        "splits": {
+            "mine": {
+                "s1_ms": best_sector(mine, "s1_ms"),
+                "s2_ms": best_sector(mine, "s2_ms"),
+                "s3_ms": best_sector(mine, "s3_ms"),
+            },
+            "fastest": {
+                "s1_ms": best_sector(others, "s1_ms"),
+                "s2_ms": best_sector(others, "s2_ms"),
+                "s3_ms": best_sector(others, "s3_ms"),
+            },
+        },
+    }
+
+    # --- Récords históricos por circuito + coche ---
+    # Mejor vuelta de cada piloto en este circuito con este coche (vueltas válidas)
+    # track_id es NULL en la BD (no se guarda en sync), así que filtramos por nombre.
+    car = race.car_name
+    best_by_driver = {}
+    all_track_laps = (db.query(Lap, Race.track_name, Race.car_name)
+                      .join(Race, Race.id == Lap.race_id)
+                      .filter(Race.track_name == race.track_name, Race.car_name == car)
+                      .filter(Lap.lap_valid == True, Lap.lap_time_ms.isnot(None))  # noqa
+                      .all())
+    for L, _tname, _car in all_track_laps:
+        dn = (L.driver_name or "").strip()
+        if not dn:
+            continue
+        key = dn.lower()
+        cur = best_by_driver.get(key)
+        if cur is None or L.lap_time_ms < cur["best_ms"]:
+            best_by_driver[key] = {
+                "driver": dn,
+                "best_ms": L.lap_time_ms,
+                "laps": L.lap_time_ms,
+                "race_date": None,
+            }
+
+    ranked = sorted(best_by_driver.values(), key=lambda x: x["best_ms"])
+    my_rank = next((i for i, r in enumerate(ranked) if my_name == r["driver"].lower()), None)
+    records = {
+        "car": car,
+        "total_drivers": len(ranked),
+        "track_best": ranked[0] if ranked else None,
+        "my_rank": (my_rank + 1) if my_rank is not None else None,
+        "my_best_ms": ranked[my_rank]["best_ms"] if my_rank is not None else None,
+        "my_best_fmt": _fmt_ms(ranked[my_rank]["best_ms"]) if my_rank is not None else None,
+        "top5": [
+            {
+                "driver": r["driver"],
+                "best_ms": r["best_ms"],
+                "best_fmt": _fmt_ms(r["best_ms"]),
+            }
+            for r in ranked[:5]
+        ],
+        "count": len(ranked),
+    }
+
+    return {
+        "track": track_info,
+        "race_breakdown": race_breakdown,
+        "records": records,
+        "available_tracks": available_tracks,
     }

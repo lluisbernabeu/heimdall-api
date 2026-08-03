@@ -85,6 +85,8 @@ class SyncService:
         profile.division = data.get("division")
         profile.c_rating = data.get("c_rating")
         profile.cc_rating = data.get("cc_rating")
+        profile.rating_by_sim = data.get("rating_by_sim") or []
+        profile.achievements_json = data.get("achievements") or {}
         team = data.get("team") or {}
         profile.team_name = team.get("teamname") if isinstance(team, dict) else None
         profile.team_logo = team.get("teamlogo") if isinstance(team, dict) else None
@@ -326,6 +328,7 @@ class SyncService:
         self.db.commit()
 
     def _sync_standings(self, profile: LfmProfile, event_ids):
+        from ..models import ApiCache
         for eid in event_ids:
             try:
                 data = lfm.get_season_standings(eid)
@@ -335,6 +338,17 @@ class SyncService:
             lfm.sleep_between_calls()
             if not isinstance(data, dict):
                 continue
+            # Leaderboard COMPLETO en api_cache (regla nº1: todo externo -> BD)
+            try:
+                row = self.db.query(ApiCache).filter_by(key=f"lfm:standings:{eid}").first()
+                if row is None:
+                    row = ApiCache(key=f"lfm:standings:{eid}")
+                    self.db.add(row)
+                row.payload = data
+                row.fetched_at = datetime.utcnow()
+                self.db.commit()
+            except Exception as e:
+                log.warning("caché standings %s falló: %s", eid, e)
             for car_class, divisions in data.items():
                 if not isinstance(divisions, dict):
                     continue
