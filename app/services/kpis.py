@@ -69,6 +69,16 @@ def overview(db: Session, profile_id: int):
     profile = db.query(LfmProfile).filter_by(id=profile_id).first()
     if not profile:
         return None
+    # Rating real por simulador (fuente de verdad: rating_by_sim de LFM)
+    ac_rating = None
+    ac_license = None
+    ac_division = None
+    for sim in (profile.rating_by_sim or []):
+        if isinstance(sim, dict) and sim.get("sim_id") == 3:  # Assetto Corsa
+            ac_rating = sim.get("rating")
+            ac_license = sim.get("license")
+            ac_division = sim.get("division")
+            break
     races = (db.query(Race).filter_by(profile_id=profile_id)
              .order_by(Race.race_date.desc()).all())
     finished = [r for r in races if not r.dns and not r.dsq and r.finish_pos]
@@ -99,6 +109,11 @@ def overview(db: Session, profile_id: int):
             "avatar": profile.avatar,
             "license": profile.license,
             "safety_rating": profile.safety_rating,
+            "c_rating": profile.c_rating,
+            "cc_rating": profile.cc_rating,
+            "ac_rating": ac_rating,
+            "ac_license": ac_license,
+            "ac_division": ac_division,
             "division": profile.division,
             "team_name": profile.team_name,
             "team_logo": profile.team_logo,
