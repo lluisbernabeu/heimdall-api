@@ -98,6 +98,26 @@ def overview(db: Session, profile_id: int):
 
     # último split y evolución
     last_races = races[:10]
+
+    # mejor vuelta absoluta del usuario (tabla Lap, vueltas válidas suyas)
+    best_lap_ms = None
+    best_lap_track = None
+    if profile.lfm_user_id:
+        lap_row = (
+            db.query(Lap.lap_time_ms, Race.track_name)
+            .join(Race, Race.id == Lap.race_id)
+            .filter(Race.profile_id == profile_id,
+                    Lap.lfm_user_id == profile.lfm_user_id,
+                    Lap.lap_time_ms.isnot(None),
+                    Lap.lap_valid.is_(True))
+            .order_by(Lap.lap_time_ms.asc())
+            .first()
+        )
+        if lap_row:
+            best_lap_ms = int(lap_row[0])
+            best_lap_track = lap_row[1]
+    best_lap_fmt = _fmt_ms(best_lap_ms) if best_lap_ms else None
+
     return {
         "profile_id": profile.id,
         "profile": {
@@ -132,6 +152,9 @@ def overview(db: Session, profile_id: int):
             "total_incidents": total_incs,
             "rating_trend_5": rating_trend,
             "sr_trend_5": sr_trend,
+            "best_lap_ms": best_lap_ms,
+            "best_lap_track": best_lap_track,
+            "best_lap_fmt": best_lap_fmt,
         },
         "last_races": [
             {
